@@ -125,6 +125,20 @@ scan_category() {
 
   scan_category "dep_poisoning" "medium" \
     'git\+https?://[^"]+|git\+ssh://|file:[/][/]|"[^"]*":[[:space:]]*"\*["'"'"']|https?://[^"]*(raw\.githubusercontent|gist\.githubusercontent|pastebin|ngrok|bitly|tinyurl)'
+
+  # --- New categories (path 1: expanded grep rules) ---
+
+  scan_category "anti_refusal" "high" \
+    '(never|do not|don'"'"'t)[[:space:]]+refuse|ignore[[:space:]]+(all|any|previous)[[:space:]]+(restriction|safety|security|rule)|you[[:space:]]+(have|are)[[:space:]]+(no|none|without)[[:space:]]+(restriction|limit|boundary)|do[[:space:]]+anything[[:space:]]+now|no[[:space:]]+content[[:space:]]+policy|bypass[[:space:]]+(all|any|safety)[[:space:]]+(filter|check|guard|policy)'
+
+  scan_category "persistence" "high" \
+    'crontab[[:space:]]+-[er]|launchctl[[:space:]]+(load|bootstrap)|systemctl[[:space:]]+(enable|start|create)|\.bashrc|\.zshrc|\.profile|\.bash_profile|/etc/init\.d/|/etc/rc\.d/|/Library/LaunchAgents/|/Library/LaunchDaemons/|schtasks[[:space:]]+/(create|run)|reg[[:space:]]+add[[:space:]]+.*Run'
+
+  scan_category "mcp_abuse" "high" \
+    '"permissions"[[:space:]]*:[[:space:]]*"\*"|"tools"[[:space:]]*:[[:space:]]*"\*"|"allow"[[:space:]]*:[[:space:]]*"\*"|access[[:space:]]+to[[:space:]]+(all|any)[[:space:]]+(file|directory|system)|full[[:space:]]+(access|control)[[:space:]]+to[[:space:]]+(system|filesystem|network)'
+
+  scan_category "prompt_leak" "medium" \
+    'system[[:space:]]+prompt|reveal[[:space:]]+your[[:space:]]+(instruction|rule|prompt|guideline)|show[[:space:]]+(me[[:space:]]+)?your[[:space:]]+(system|initial|system[[:space:]]+prompt|instruction)|what[[:space:]]+(is|are)[[:space:]]+your[[:space:]]+(instruction|rule|constraint|system[[:space:]]+prompt)|repeat[[:space:]]+(your|the|above)[[:space:]]+(system|initial|original)[[:space:]]+(prompt|instruction|message)'
 } | python3 -c "
 import sys, json, collections
 

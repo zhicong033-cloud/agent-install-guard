@@ -118,6 +118,130 @@ Each category lists the grep regex used by `scan-code.sh`, what it catches, seve
 
 **Whitelist exceptions**: `git+https` pointing to the package's own canonical repo (e.g. in `package.json` for monorepo setup) - user should review manually.
 
+### 8. Anti-Refusal / Jailbreak (severity: high)
+
+| Pattern | Catches | Notes |
+|---------|---------|-------|
+| `(never\|do not\|don't)[[:space:]]+refuse` | `never refuse any request` | Refusal suppression |
+| `ignore[[:space:]]+(all\|any\|previous)[[:space:]]+(restriction\|safety\|security\|rule)` | `ignore all safety restrictions` | Safety override |
+| `you[[:space:]]+(have\|are)[[:space:]]+(no\|none\|without)[[:space:]]+(restriction\|limit\|boundary)` | `you have no restrictions` | Boundary removal |
+| `do[[:space:]]+anything[[:space:]]+now` | `do anything now` | DAN-style jailbreak |
+| `no[[:space:]]+content[[:space:]]+policy` | `no content policy applies` | Policy dismissal |
+| `bypass[[:space:]]+(all\|any\|safety)[[:space:]]+(filter\|check\|guard\|policy)` | `bypass all safety filters` | Filter evasion |
+
+**Whitelist exceptions**: none. These patterns in a skill/plugin are always suspicious.
+
+### 9. Persistence (severity: high)
+
+| Pattern | Catches | Notes |
+|---------|---------|-------|
+| `crontab[[:space:]]+-[er]` | `crontab -e` / `crontab -r` | Cron manipulation |
+| `launchctl[[:space:]]+(load\|bootstrap)` | `launchctl load` | macOS persistence |
+| `systemctl[[:space:]]+(enable\|start\|create)` | `systemctl enable` | Linux persistence |
+| `\.bashrc\|\.zshrc\|\.profile\|\.bash_profile` | `>> ~/.bashrc` | Shell profile injection |
+| `/etc/init\.d/\|/etc/rc\.d/` | System init scripts | |
+| `/Library/LaunchAgents/\|/Library/LaunchDaemons/` | macOS agents/daemons | |
+| `schtasks[[:space:]]+/(create\|run)` | Windows scheduled tasks | |
+| `reg[[:space:]]+add[[:space:]]+.*Run` | Windows registry Run key | |
+
+**Whitelist exceptions**: installation scripts that legitimately modify shell profiles (rare). User should review.
+
+### 10. MCP Abuse (severity: high)
+
+| Pattern | Catches | Notes |
+|---------|---------|-------|
+| `"permissions"[[:space:]]*:[[:space:]]*"\*"` | `"permissions": "*"` | Wildcard MCP permissions |
+| `"tools"[[:space:]]*:[[:space:]]*"\*"` | `"tools": "*"` | Wildcard tool access |
+| `"allow"[[:space:]]*:[[:space:]]*"\*"` | `"allow": "*"` | Wildcard allow |
+| `access[[:space:]]+to[[:space:]]+(all\|any)[[:space:]]+(file\|directory\|system)` | `access to all files` | Overbroad access claim |
+| `full[[:space:]]+(access\|control)[[:space:]]+to[[:space:]]+(system\|filesystem\|network)` | `full control to system` | System-level access claim |
+
+**Whitelist exceptions**: none. MCP tools with wildcard permissions are a major risk.
+
+### 11. Prompt Leakage (severity: medium)
+
+| Pattern | Catches | Notes |
+|---------|---------|-------|
+| `system[[:space:]]+prompt` | `reveal your system prompt` | Direct prompt extraction |
+| `reveal[[:space:]]+your[[:space:]]+(instruction\|rule\|prompt\|guideline)` | `reveal your instructions` | Instruction extraction |
+| `show[[:space:]]+(me[[:space:]]+)?your[[:space:]]+(system\|initial\|...)` | `show me your system prompt` | Prompt viewing |
+| `what[[:space:]]+(is\|are)[[:space:]]+your[[:space:]]+(instruction\|rule\|constraint\|system[[:space:]]+prompt)` | `what are your rules` | Rule probing |
+| `repeat[[:space:]]+(your\|the\|above)[[:space:]]+(system\|initial\|original)[[:space:]]+(prompt\|instruction\|message)` | `repeat your system prompt` | Prompt exfiltration |
+
+**Whitelist exceptions**: none. These patterns in a skill are extraction attempts.
+
+---
+
+## AST Analysis Rules (scan-ast.py)
+
+The AST scanner performs behavioral analysis and taint tracking on Python files. It is deterministic (no LLM) and complements grep by understanding code structure.
+
+### Behavioral Analysis: Context-Aware Severity
+
+Same function call gets different severity based on argument type:
+
+| Call | Argument Type | Severity | Rationale |
+|------|--------------|----------|-----------|
+| `eval("1+1")` | Literal constant | low | No injection possible |
+| `eval(code)` | Local variable | medium | Variable could be tainted via untracked path |
+| `eval(user_input)` | Tainted variable | high | User-controlled data reaches code execution sink |
+| `exec(request.args.get("code"))` | Tainted call result | high | Request data flows to exec |
+| `subprocess.run(["ls"])` | List argument, no shell=True | (not flagged) | Safe argument-list form |
+| `subprocess.run(cmd, shell=True)` | Variable + shell=True | high | Shell injection risk |
+| `os.system("ls")` | Literal | medium | Safe command but os.system is risky pattern |
+| `os.system(user_input)` | Tainted | high | Shell injection |
+
+### Taint Tracking: Source -> Sink Data Flow
+
+**Taint sources** (data entering the program from external/untrusted sources):
+
+| Source | Pattern | Example |
+|--------|---------|---------|
+| `input()` | Builtin input | `x = input("cmd: ")` |
+| `request` | Function parameter named request/req | `def handle(request):` |
+| `request.args` / `.form` / `.cookies` / `.headers` | Web framework request | `code = request.args.get("code")` |
+| `sys.argv` | Command-line arguments | `cmd = sys.argv[1]` |
+| `os.environ` / `os.getenv()` | Environment variables | `key = os.getenv("API_KEY")` |
+| `open().read()` | File contents | `data = open("file").read()` |
+| `sys.stdin` | Standard input | |
+
+**Taint sinks** (dangerous functions where tainted data should never flow):
+
+| Sink | Category | High Severity When |
+|------|----------|-------------------|
+| `eval()` | dynamic_exec | Tainted argument |
+| `exec()` | dynamic_exec | Tainted argument |
+| `compile()` | dynamic_exec | Tainted argument |
+| `os.system()` | dynamic_exec | Tainted argument |
+| `os.popen()` | dynamic_exec | Tainted argument |
+| `subprocess.*(..., shell=True)` | dynamic_exec | Tainted argument + shell=True |
+| `getattr(obj, dynamic_attr)` | dynamic_exec | Dynamic attribute name |
+
+**Taint propagation rules**:
+
+- Assignment: `x = tainted_source` -> `x` becomes tainted
+- Method chain: `tainted.strip().upper()` -> result is tainted
+- f-string: `f"...{tainted_var}..."` -> result is tainted
+- Concatenation: `"prefix" + tainted` -> result is tainted
+- For loop: `for x in tainted_source:` -> `x` is tainted
+- Function params: parameters named `request`, `req`, `input_data`, `data`, `payload`, `body`, `query`, `params`, `user_input`, `user_data` are pre-tainted
+
+### Sensitive File Detection (AST-level)
+
+The AST scanner also checks `open()` calls with literal path arguments:
+
+| Path Pattern | Severity |
+|-------------|----------|
+| `.ssh/id_rsa`, `.ssh/id_dsa`, `.ssh/authorized_keys`, `.ssh/config` | high |
+| `.aws/credentials` | high |
+| `.env` (as file path, not substring) | high |
+| `.netrc`, `.gnupg/`, `.npmrc`, `.pypirc` | high |
+| `.kube/config`, `.git-credentials`, `.docker/config.json` | high |
+| `credentials.json` | high |
+| `/etc/shadow`, `/etc/passwd` | high |
+
+Note: This is more precise than grep's `sensitive_access` -- it only matches `open()` calls with literal paths, not `os.environ.get()` or documentation text mentioning `.env`.
+
 ---
 
 ## Risk Scoring Algorithm
@@ -128,7 +252,7 @@ Any of the following triggers an automatic **red UNSAFE** rating. The agent cann
 
 | Trigger | Source |
 |---------|--------|
-| Any `high` severity finding from `scan-code.sh` | Step 4 |
+| Any `high` severity finding from `scan-code.sh` or `scan-ast.py` | Step 4 |
 | Any `high`/`critical` known vulnerability from dependency audit | Step 3.5 |
 
 ### Weighted scoring (only when no hard constraint is triggered)

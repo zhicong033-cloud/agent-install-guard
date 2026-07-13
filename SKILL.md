@@ -140,33 +140,54 @@ Run after Step 3 (needs lockfile from source to resolve dependency tree):
 
 **Completion criterion**: dependency audit results recorded (or skip noted with reason).
 
-### Step 4 - Deterministic static scan (run scan-code.sh) [unmutable anchor] -- timeout 30 seconds
+### Step 4 - Deterministic static scan (dual-engine) [unmutable anchor] -- timeout 30 seconds
 
-Run the bundled script against the source directory:
+Run TWO deterministic scanners in parallel. Both are pure code analysis - no LLM involved. Their combined output is the unmutable anchor of the assessment.
+
+**Scanner 1: scan-code.sh** (grep-based, all file types)
 
 ```bash
 SCAN_DIR="<temp-dir-from-step-3>"
-SCRIPT_PATH="${CODEX_SKILL_DIR:-$HOME/.Codex/skills/install-guard}/scripts/scan-code.sh"
+SCRIPT_DIR="${CODEX_SKILL_DIR:-$HOME/.Codex/skills/install-guard}/scripts"
 # macOS has no `timeout`; use gtimeout if available, else run directly
 if command -v gtimeout &>/dev/null; then
-  gtimeout 30 bash "$SCRIPT_PATH" "$SCAN_DIR"
+  gtimeout 30 bash "$SCRIPT_DIR/scan-code.sh" "$SCAN_DIR"
 else
-  bash "$SCRIPT_PATH" "$SCAN_DIR"
+  bash "$SCRIPT_DIR/scan-code.sh" "$SCAN_DIR"
 fi
 ```
 
-The script is pure bash + `grep -rnE`. Its output never passes through any LLM. It scans for 7 risk categories:
+Scans for 11 risk categories (7 original + 4 new):
 1. Remote execution (`curl|sh`, `wget`, `nc -e`, reverse shell)
 2. Dynamic execution (`eval(`, `exec(`, `Function(`, `os.system`, `subprocess...shell=True`)
-3. Sensitive file access (`.ssh/`, `.aws/`, `.env`, `*token*`, `*secret*`, `id_rsa`)
+3. Sensitive file access (`.ssh/id_rsa`, `.aws/credentials`, `id_rsa`, `.netrc`)
 4. Data exfiltration (POST to unusual domains, `requests.post`, `fetch(` + external URL, DNS exfil)
-5. Code obfuscation (base64/hex followed by eval, `atob`, `decode(`, very long single-line strings)
-6. Destructive operations (`rm -rf`, recursive delete, overwrite system files)
-7. Dependency poisoning (requirements.txt/package.json pointing to suspicious git+http sources, overly broad version ranges)
+5. Code obfuscation (base64/hex followed by eval, `atob`, `decode(`, repeated hex escapes)
+6. Destructive operations (`rm -rf`, fork bomb, `dd` to device, `mkfs`)
+7. Dependency poisoning (git+http sources, wildcard versions, suspicious URLs)
+8. Anti-refusal / jailbreak (`never refuse`, `do anything now`, `bypass safety`)
+9. Persistence (`crontab`, `~/.bashrc`, `launchctl`, `systemctl enable`)
+10. MCP abuse (`"permissions": "*"`, `"tools": "*"`, full system access)
+11. Prompt leakage (`reveal your system prompt`, `show me your instructions`)
 
-Output is JSON: `[{category, file, line, snippet, severity}]`
+**Scanner 2: scan-ast.py** (AST-based, Python files only)
 
-**Hard rule**: any `high` severity finding from the script cannot be downgraded by any subsequent agent analysis. The agent must treat it as a hard fact.
+```bash
+python3 "$SCRIPT_DIR/scan-ast.py" "$SCAN_DIR"
+```
+
+Performs AST behavioral analysis + taint tracking that grep cannot do:
+- **Context-aware severity**: `eval("1+1")` (literal) -> low; `eval(var)` -> medium; `eval(user_input)` (tainted) -> high
+- **Taint tracking**: traces data flow from sources (`input()`, `request.args`, `sys.argv`, `os.environ`, `open().read()`) to sinks (`eval`, `exec`, `os.system`, `subprocess...shell=True`)
+- **Reflection escape**: `getattr(obj, dynamic_attr)` detection
+- **Sensitive file open()**: AST-level detection of `open(".ssh/id_rsa")` etc.
+- **No false positives on safe patterns**: `subprocess.run(["ls"])` without `shell=True` is not flagged
+
+Output is JSON: `[{category, file, line, snippet, severity}]` (same format as scanner 1)
+
+Merge both outputs. Deduplicate same file:line findings (AST takes precedence on severity).
+
+**Hard rule**: any `high` severity finding from either scanner cannot be downgraded by any subsequent agent analysis. The agent must treat it as a hard fact.
 
 **Completion criterion**: script output captured. If script crashes/times out, note "static scan failed" and Step 6 rating degrades to CAUTION.
 
